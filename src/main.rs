@@ -183,9 +183,6 @@ fn main() -> Result<()> {
     // Declare sinks:
     let mut decoder_sink: Option<FfmpegDecoderSink> = None;
 
-    // If FIFO outputs are set, we won't open PulseAudio sinks for those paths:
-    let want_fifo_pcm = args.fifo_out_pcm.is_some();
-
     let mut pcm_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_pcm {
         Some(p) => Some(Box::new(FileSink::open(p, Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)), // RDWR as above
         None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)),

@@ -1,12 +1,9 @@
-use std::fmt::{format, Debug, Display};
 use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::thread;
 use anyhow::Context;
 use libpulse_binding::channelmap::Map;
-use libpulse_binding::channelmap::MapDef::{AIFF, ALSA};
+use libpulse_binding::channelmap::MapDef::AIFF;
 use libpulse_binding::def::BufferAttr;
 use libpulse_binding::sample::{Format, Spec};
 use libpulse_binding::stream::Direction;

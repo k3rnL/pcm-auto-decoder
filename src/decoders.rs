@@ -1,5 +1,5 @@
 /* AC-3 decoder using ffmpeg child: write IEC61937 in, read 6ch float out */
-use std::io::{Read, Sink, Write};
+use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use anyhow::{anyhow, Context};
@@ -46,7 +46,7 @@ impl AudioDecoder for FfmpegDecoderSink {
             .spawn()
             .context("spawning ffmpeg")?;
 
-        let mut writer = sink;
+        let writer = sink;
         let stdout = child.stdout.take().context("ffmpeg stdout")?;
         let pump = thread::spawn(move || -> anyhow::Result<Box<dyn AudioSink + Send>> {
             let mut reader = std::io::BufReader::new(stdout);
