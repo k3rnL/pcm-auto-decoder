@@ -1,5 +1,7 @@
+use crate::sinks::AudioSink;
 mod iec61937_detector;
 mod sinks;
+mod decoders;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -14,9 +16,9 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
-use crate::sinks::{File6Sink, StereoPcmWriter};
+use crate::sinks::{FileSink, PulseAudioSink};
 use iec61937_detector::Iec61937Detector;
-use sinks::{Ac3Out, Ac3Sink, Pa6Sink, PcmFileSink, PcmPaSink};
+use crate::decoders::{AudioDecoder, FfmpegDecoderSink};
 
 /// IEC-61937 preamble words (big-endian)
 const PA_SYNC: u16 = 0xF872;
@@ -95,8 +97,10 @@ impl Input {
             let mut cm = Map::default();
             cm.init_stereo();
 
-            let mut attr = BufferAttr::default();
-            attr.fragsize = (frames * bytes_per_frame) as u32;
+            let attr = BufferAttr {
+                maxlength: u32::MAX, tlength: u32::MAX, prebuf: u32::MAX, minreq: u32::MAX,
+                fragsize: (frames * bytes_per_frame) as u32,
+            };
             let pa_in = Simple::new(
                 None,
                 "pcm-auto-decoder",
@@ -140,22 +144,20 @@ impl Input {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    // Choose sinks:
-    let mut pcm_sink_pa: Option<PcmPaSink> = None;
-    let mut ac3_sink: Option<Ac3Sink> = None;
+    // Declare sinks:
+    let mut decoder_sink: Option<FfmpegDecoderSink> = None;
 
     // If FIFO outputs are set, we won't open PulseAudio sinks for those paths:
     let want_fifo_pcm = args.fifo_out_pcm.is_some();
-    let want_fifo_6ch = args.fifo_out_6ch.is_some();
 
-    let mut pcm_sink_file = match &args.fifo_out_pcm {
-        Some(p) => Some(PcmFileSink::open(p)?), // RDWR as above
-        None => None,
+    let mut pcm_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_pcm {
+        Some(p) => Some(Box::new(FileSink::open(p)?)), // RDWR as above
+        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::S16le, 48_000, 2)?)),
     };
 
-    let mut file6_sink = match &args.fifo_out_6ch {
-        Some(p) => Some(File6Sink::open(p)?),   // RDWR as above
-        None => None,
+    let mut decoded_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_6ch {
+        Some(p) => Some(Box::new(FileSink::open(p)?)),   // RDWR as above
+        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::F32le, 48_000, 6)?)),
     };
 
     // Prepare input (FIFO or PulseAudio)
@@ -163,7 +165,6 @@ fn main() -> Result<()> {
 
     let mut mode = Mode::Unknown;
     let mut chunks_without_61937 = 0usize;
-    let mut detector = Iec61937Detector::new();
 
     eprintln!(
         "Running… source={:?} stdin={:?} outPCM={:?} out6ch={:?} chunk_frames={} det_window={}",
@@ -182,15 +183,10 @@ fn main() -> Result<()> {
                     chunks_without_61937 = 0;
 
                     // open AC3 sink target
-                    if want_fifo_6ch {
-                        let f6 = File6Sink::open(args.fifo_out_6ch.as_ref().unwrap())?;
-                        ac3_sink = Some(Ac3Sink::open(Ac3Out::File(f6))?);
-                    } else {
-                        let pa6 = Pa6Sink::open(args.sink.as_deref())?;
-                        ac3_sink = Some(Ac3Sink::open(Ac3Out::Pa(pa6))?);
-                    }
-                    if let Some(s) = &mut ac3_sink {
-                        s.write_spdif(chunk)?;
+                    decoder_sink = Some(FfmpegDecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
+
+                    if let Some(s) = &mut decoder_sink {
+                        s.write(chunk)?;
                     }
                 } else {
                     chunks_without_61937 += 1;
@@ -198,14 +194,8 @@ fn main() -> Result<()> {
                         eprintln!("[INIT] Assuming PCM.");
                         mode = Mode::Pcm;
 
-                        if !want_fifo_pcm {
-                            pcm_sink_pa = Some(PcmPaSink::open(args.sink.as_deref())?);
-                        }
-                        if let Some(s) = &mut pcm_sink_file {
-                            s.write_pcm_s16le_2ch(chunk)?;
-                        }
-                        if let Some(s) = &mut pcm_sink_pa {
-                            s.write_pcm_s16le_2ch(chunk)?;
+                        if let Some(s) = &mut pcm_sink {
+                            s.write(chunk)?;
                         }
                     }
                 }
@@ -213,58 +203,43 @@ fn main() -> Result<()> {
             Mode::Pcm => {
                 if has_61937.is_some() {
                     eprintln!("Detected AC-3; switching PCM -> AC-3 decode.");
-                    pcm_sink_file = None;
-                    pcm_sink_pa = None;
 
                     mode = Mode::Iec61937;
                     chunks_without_61937 = 0;
 
-                    if want_fifo_6ch {
-                        let f6 = File6Sink::open(args.fifo_out_6ch.as_ref().unwrap())?;
-                        ac3_sink = Some(Ac3Sink::open(Ac3Out::File(f6))?);
-                    } else {
-                        let pa6 = Pa6Sink::open(args.sink.as_deref())?;
-                        ac3_sink = Some(Ac3Sink::open(Ac3Out::Pa(pa6))?);
+                    decoder_sink = Some(FfmpegDecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
+
+                    if let Some(s) = &mut decoder_sink {
+                        s.write(chunk)?;
                     }
-                    if let Some(s) = &mut ac3_sink {
-                        s.write_spdif(chunk)?;
-                    }
-                } else {
-                    if let Some(s) = &mut pcm_sink_file {
-                        s.write_pcm_s16le_2ch(chunk)?;
-                    }
-                    if let Some(s) = &mut pcm_sink_pa {
-                        s.write_pcm_s16le_2ch(chunk)?;
-                    }
+                } else if let Some(s) = &mut pcm_sink {
+                    s.write(chunk)?;
                 }
             }
             Mode::Iec61937 => {
                 if has_61937.is_some() {
                     chunks_without_61937 = 0;
-                    if let Some(s) = &mut ac3_sink {
-                        s.write_spdif(chunk)?;
+                    if let Some(s) = &mut decoder_sink {
+                        s.write(chunk)?;
                     }
                 } else {
                     chunks_without_61937 += 1;
                     if chunks_without_61937 >= args.det_window {
                         eprintln!("Lost IEC-61937; switching to PCM.");
-                        ac3_sink = None;
+
+                        if let Some(dec) = decoder_sink.take() {
+                            decoded_sink = Some(dec.finish()?)
+                        }
+
+                        decoder_sink = None;
                         mode = Mode::Pcm;
 
-                        if want_fifo_pcm {
-                            pcm_sink_file = Some(PcmFileSink::open(args.fifo_out_pcm.as_ref().unwrap())?);
-                        } else {
-                            pcm_sink_pa = Some(PcmPaSink::open(args.sink.as_deref())?);
+                        if let Some(s) = &mut pcm_sink {
+                            s.write(chunk)?;
                         }
-                        if let Some(s) = &mut pcm_sink_file {
-                            s.write_pcm_s16le_2ch(chunk)?;
-                        }
-                        if let Some(s) = &mut pcm_sink_pa {
-                            s.write_pcm_s16le_2ch(chunk)?;
-                        }
-                    } else if let Some(s) = &mut ac3_sink {
+                    } else if let Some(s) = &mut decoder_sink {
                         // still push trailing words, helps decoder flush
-                        s.write_spdif(chunk)?;
+                        s.write(chunk)?;
                     }
                 }
             }

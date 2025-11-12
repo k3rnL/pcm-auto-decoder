@@ -8,3 +8,7 @@ anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 libpulse-binding = "2.27.1"
 libpulse-simple-binding = "2.27.1"
+base64 = "0.22.1"
+
+[dev-dependencies]
+assert_cmd = "2"

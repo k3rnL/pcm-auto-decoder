@@ -3,4 +3,6 @@ LABEL authors="Erwan Daniel"
 
 RUN apt update -y && apt install -y libpulse-dev ffmpeg
 
-ENTRYPOINT ["top", "-b"]
+COPY entrypoint.sh /entrypoint.sh
+
+ENTRYPOINT ["bash", "/entrypoint.sh"]

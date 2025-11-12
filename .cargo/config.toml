@@ -1,0 +1,4 @@
+[target.aarch64-unknown-linux-gnu]
+
+# Optional: tune for Pi 5 (Cortex-A76)
+rustflags = ["-C", "target-cpu=cortex-a76"]
