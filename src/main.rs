@@ -16,6 +16,7 @@ use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
+use libpulse_binding::channelmap::MapDef::ALSA;
 use crate::sinks::{FileSink, PulseAudioSink};
 use iec61937_detector::Iec61937Detector;
 use crate::decoders::{AudioDecoder, FfmpegDecoderSink};
@@ -45,13 +46,49 @@ struct Args {
     #[arg(long)]
     stdin: Option<PathBuf>,
 
+    /// Input channels, should always be 2 as it's the IEC61937 standard
+    #[arg(long, default_value_t = 2)]
+    in_channels: u8,
+
+    /// Input rate, default 48kHz
+    #[arg(long, default_value_t = 48_000)]
+    in_rate: u32,
+
+    /// Input format, default S16LE
+    #[arg(long, default_value = "S16LE")]
+    in_format: String,
+
     /// Write stereo PCM (S16LE 2ch @ 48kHz) here in PCM mode
     #[arg(long, value_name = "PATH")]
     fifo_out_pcm: Option<PathBuf>,
 
+    /// Desired channels on the PCM output (when no compressed data is detected), default 2
+    #[arg(long, default_value_t = 2)]
+    out_pcm_channels: u8,
+
+    /// Desired rate on the PCM output (when no compressed data is detected), default 48kHz
+    #[arg(long, default_value_t = 48_000)]
+    out_pcm_rate: u32,
+
+    /// Desired format on the PCM output (when no compressed data is detected), default S16LE
+    #[arg(long, default_value = "S16LE")]
+    out_pcm_format: String,
+
     /// Write decoded 5.1 PCM (F32LE 6ch @ 48kHz) here in AC-3 mode
     #[arg(long, value_name = "PATH")]
-    fifo_out_6ch: Option<PathBuf>,
+    fifo_out_decoded: Option<PathBuf>,
+
+    /// Desired channels on decoded output, default 6
+    #[arg(long, default_value_t = 6)]
+    out_decoded_channels: u8,
+
+    /// Desired rate on decoded output, default 48kHz
+    #[arg(long, default_value_t = 48_000)]
+    out_decoded_rate: u32,
+
+    /// Desired format on decoded output, default F32LE (float32le)
+    #[arg(long, default_value = "F32LE")]
+    out_decoded_format: String,
 
     /// Frames per read
     #[arg(long, default_value_t = DEFAULT_CHUNK_FRAMES)]
@@ -79,7 +116,7 @@ enum Input {
 impl Input {
     fn open(args: &Args) -> Result<Self> {
         let frames = args.chunk_frames;
-        let bytes_per_frame = 2 /*ch*/ * 2 /*bytes*/;
+        let bytes_per_frame = args.in_channels as usize /*ch*/ * 2 /*bytes*/;
         let buf = vec![0u8; frames * bytes_per_frame];
 
         if let Some(path) = &args.stdin {
@@ -91,11 +128,10 @@ impl Input {
                 .as_ref()
                 .map(|s| s.as_str())
                 .context("--source is required when not using --stdin")?;
-            // PulseAudio capture: S16LE 2ch @ 48kHz
-            let ss = Spec { format: Format::S16le, rate: 48_000, channels: 2 };
+            let ss = Spec { format: Format::parse(&args.in_format), rate: args.in_rate, channels: args.in_channels };
             anyhow::ensure!(ss.is_valid(), "Invalid capture spec");
             let mut cm = Map::default();
-            cm.init_stereo();
+            cm.init_auto(args.in_channels, ALSA);
 
             let attr = BufferAttr {
                 maxlength: u32::MAX, tlength: u32::MAX, prebuf: u32::MAX, minreq: u32::MAX,
@@ -116,7 +152,7 @@ impl Input {
         }
     }
 
-    fn read_chunk<'a>(&'a mut self) -> Result<&'a [u8]> {
+    fn read_chunk(&mut self) -> Result<&[u8]> {
         match self {
             Input::Pa(pa, buf) => {
                 pa.read(buf).context("pa_simple_read")?;
@@ -151,13 +187,13 @@ fn main() -> Result<()> {
     let want_fifo_pcm = args.fifo_out_pcm.is_some();
 
     let mut pcm_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_pcm {
-        Some(p) => Some(Box::new(FileSink::open(p)?)), // RDWR as above
-        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::S16le, 48_000, 2)?)),
+        Some(p) => Some(Box::new(FileSink::open(p, Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)), // RDWR as above
+        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)),
     };
 
-    let mut decoded_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_6ch {
-        Some(p) => Some(Box::new(FileSink::open(p)?)),   // RDWR as above
-        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::F32le, 48_000, 6)?)),
+    let mut decoded_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_decoded {
+        Some(p) => Some(Box::new(FileSink::open(p, Format::parse(&args.out_decoded_format), args.out_decoded_rate, args.out_decoded_channels)?)),   // RDWR as above
+        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_decoded_format), args.out_decoded_rate, args.out_decoded_channels)?)),
     };
 
     // Prepare input (FIFO or PulseAudio)
@@ -168,7 +204,7 @@ fn main() -> Result<()> {
 
     eprintln!(
         "Running… source={:?} stdin={:?} outPCM={:?} out6ch={:?} chunk_frames={} det_window={}",
-        args.source, args.stdin, args.fifo_out_pcm, args.fifo_out_6ch, args.chunk_frames, args.det_window
+        args.source, args.stdin, args.fifo_out_pcm, args.fifo_out_decoded, args.chunk_frames, args.det_window
     );
 
     loop {

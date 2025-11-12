@@ -14,11 +14,13 @@ use libpulse_simple_binding::Simple;
 
 pub trait AudioSink {
     fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()>;
+    fn specs(& self) -> Spec;
 }
 
 /* PulseAudio stereo sink */
 pub(crate) struct PulseAudioSink {
     pa: Simple,
+    spec: Spec,
 }
 impl PulseAudioSink {
     pub(crate) fn open(sink: Option<&str>, format: Format, rate: u32, channels: u8) -> anyhow::Result<Self> {
@@ -40,27 +42,36 @@ impl PulseAudioSink {
             Some(&attr),
         )
             .context(format!("opening PulseAudio sink with spec={:?}", ss))?;
-        Ok(Self { pa })
+        Ok(Self { pa, spec: ss })
     }
 }
 impl AudioSink for PulseAudioSink {
     fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         self.pa.write(bytes).context("pa_simple_write")
     }
+
+    fn specs(& self) -> Spec {
+        self.spec
+    }
 }
 
 /* FIFO/file stereo sink */
 pub(crate) struct FileSink {
     f: File,
+    spec: Spec
 }
 impl FileSink {
-    pub(crate) fn open(path: &PathBuf) -> anyhow::Result<Self> {
+    pub(crate) fn open(path: &PathBuf, format: Format, rate: u32, channels: u8) -> anyhow::Result<Self> {
         let f = File::options().read(true).write(true).open(path).context("open fifo_out")?;
-        Ok(Self { f })
+        Ok(Self { f, spec: Spec {format, rate, channels} })
     }
 }
 impl AudioSink for FileSink {
     fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         self.f.write_all(bytes).context("write fifo_out_pcm")
+    }
+
+    fn specs(& self) -> Spec {
+        todo!()
     }
 }

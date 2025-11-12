@@ -3,6 +3,7 @@ use std::io::{Read, Sink, Write};
 use std::process::{Child, Command, Stdio};
 use std::thread;
 use anyhow::{anyhow, Context};
+use libpulse_binding::sample::Spec;
 use crate::sinks::AudioSink;
 
 pub trait AudioDecoder : AudioSink {
@@ -16,22 +17,28 @@ pub struct FfmpegDecoderSink {
     child_stdin: std::process::ChildStdin,
     child: Option<Child>,
     _pump: Option<thread::JoinHandle<anyhow::Result<Box<dyn AudioSink + Send>>>>,
+    specs: Spec
 }
 
 impl AudioSink for FfmpegDecoderSink {
     fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
         self.child_stdin.write_all(bytes).context("write IEC61937 to ffmpeg")
     }
+
+    fn specs(& self) -> Spec {
+        self.specs
+    }
 }
 
 impl AudioDecoder for FfmpegDecoderSink {
     fn wrap(sink: Box<dyn AudioSink + Send>) -> anyhow::Result<Self>
     {
+        let spec = sink.specs();
         let mut child = Command::new("ffmpeg")
             .args([
                 "-hide_banner", "-loglevel", "warning",
                 "-f", "spdif", "-i", "pipe:0",
-                "-f", "f32le", "-ac", "6", "-ar", "48000", "pipe:1",
+                "-f", &spec.format.to_string().unwrap(), "-ac", &spec.channels.to_string(), "-ar", &spec.rate.to_string(), "pipe:1",
             ])
             .stdin(Stdio::piped())
             .stderr(Stdio::inherit())
@@ -82,7 +89,7 @@ impl AudioDecoder for FfmpegDecoderSink {
             Ok(out.unwrap())
         });
 
-        Ok(Self { child_stdin: child.stdin.take().context("ffmpeg stdin")?, child: Some(child), _pump: Some(pump) })
+        Ok(Self { child_stdin: child.stdin.take().context("ffmpeg stdin")?, child: Some(child), _pump: Some(pump), specs: spec })
     }
 
     /// Close ffmpeg input, wait for it to exit, join the pump thread
