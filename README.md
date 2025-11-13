@@ -49,6 +49,11 @@ Options:
         Print version```
 ```
 
+### Build for Raspberry Pi 5
+```bash
+cargo build --release --target aarch64-unknown-linux-gnu
+```
+
 ### Useful commands
 
 ```bash

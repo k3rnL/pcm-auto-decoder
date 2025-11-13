@@ -20,14 +20,25 @@ pub(crate) struct PulseAudioSink {
     spec: Spec,
 }
 impl PulseAudioSink {
-    pub(crate) fn open(sink: Option<&str>, format: Format, rate: u32, channels: u8) -> anyhow::Result<Self> {
+    pub(crate) fn open(sink: Option<&str>, format: Format, rate: u32, channels: u8, chunk_frames: usize) -> anyhow::Result<Self> {
         let ss = Spec { format, rate, channels };
         anyhow::ensure!(ss.is_valid(), "Invalid sample spec");
         let mut cm = Map::default();
         cm.init_auto(channels, AIFF);
+
+        let frame_bytes = (channels as u32) * 2;
+        let frag_bytes  = chunk_frames as u32 * frame_bytes;
+
+        let tlength = frag_bytes * 4;
+
         let attr = BufferAttr {
-            maxlength: u32::MAX, tlength: u32::MAX, prebuf: u32::MAX, minreq: u32::MAX, fragsize: u32::MAX,
+            maxlength: u32::MAX,
+            tlength,
+            prebuf: tlength - frag_bytes,
+            minreq: frag_bytes,
+            fragsize: u32::MAX, // playback -> ignoré
         };
+        
         let pa = Simple::new(
             None,
             "pcm-auto-decoder",

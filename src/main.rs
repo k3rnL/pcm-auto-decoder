@@ -15,7 +15,7 @@ use std::fs::File;
 use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::thread::sleep;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use libpulse_binding::channelmap::MapDef::ALSA;
 use crate::sinks::{FileSink, PulseAudioSink};
 use iec61937_detector::Iec61937Detector;
@@ -25,7 +25,7 @@ use crate::decoders::{AudioDecoder, FfmpegDecoderSink};
 const PA_SYNC: u16 = 0xF872;
 const PB_SYNC: u16 = 0x4E1F;
 
-const DEFAULT_CHUNK_FRAMES: usize = 2048;
+const DEFAULT_CHUNK_FRAMES: usize = 512;
 const DEFAULT_DET_WINDOW_CHUNKS: usize = 64;
 
 #[derive(Parser, Debug)]
@@ -90,7 +90,7 @@ struct Args {
     #[arg(long, default_value = "F32LE")]
     out_decoded_format: String,
 
-    /// Frames per read
+    /// Frames per read 512 = ~10.7 ms latency at 48 kHz
     #[arg(long, default_value_t = DEFAULT_CHUNK_FRAMES)]
     chunk_frames: usize,
 
@@ -115,9 +115,10 @@ enum Input {
 }
 impl Input {
     fn open(args: &Args) -> Result<Self> {
-        let frames = args.chunk_frames;
-        let bytes_per_frame = args.in_channels as usize /*ch*/ * 2 /*bytes*/;
-        let buf = vec![0u8; frames * bytes_per_frame];
+        let frame_bytes = (args.in_channels as u32) * 2;   // S16_LE
+        let frag_bytes  = args.chunk_frames as u32 * frame_bytes;
+
+        let buf = vec![0u8; frag_bytes as usize];
 
         if let Some(path) = &args.stdin {
             let f = File::options().read(true).open(path).context("open --stdin")?;
@@ -134,9 +135,13 @@ impl Input {
             cm.init_auto(args.in_channels, ALSA);
 
             let attr = BufferAttr {
-                maxlength: u32::MAX, tlength: u32::MAX, prebuf: u32::MAX, minreq: u32::MAX,
-                fragsize: (frames * bytes_per_frame) as u32,
+                maxlength: u32::MAX,       // ok to leave MAX here
+                tlength:   u32::MAX,       // ignored for record
+                prebuf:    u32::MAX,       // ignored for record
+                minreq:    u32::MAX,       // ignored for record
+                fragsize:  frag_bytes,     // THIS matters: when PA wakes your record stream
             };
+
             let pa_in = Simple::new(
                 None,
                 "pcm-auto-decoder",
@@ -185,12 +190,12 @@ fn main() -> Result<()> {
 
     let mut pcm_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_pcm {
         Some(p) => Some(Box::new(FileSink::open(p, Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)), // RDWR as above
-        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)),
+        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels, args.chunk_frames)?)),
     };
 
     let mut decoded_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_decoded {
         Some(p) => Some(Box::new(FileSink::open(p, Format::parse(&args.out_decoded_format), args.out_decoded_rate, args.out_decoded_channels)?)),   // RDWR as above
-        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_decoded_format), args.out_decoded_rate, args.out_decoded_channels)?)),
+        None => Some(Box::new(PulseAudioSink::open(args.sink.as_deref(), Format::parse(&args.out_decoded_format), args.out_decoded_rate, args.out_decoded_channels, args.chunk_frames)?)),
     };
 
     // Prepare input (FIFO or PulseAudio)
