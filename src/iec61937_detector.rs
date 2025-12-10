@@ -24,6 +24,9 @@ pub const PC_STRM_SHIFT: u8 = 13;
 #[derive(Debug, PartialEq)]
 pub enum StreamType {
     Ac3 = 0x01,
+    Dts1 = 0x0B,      // DTS type I
+    Dts2 = 0x0C,      // DTS type II
+    Dts3 = 0x0D,      // DTS type III
     EAc3 = 0x15,
     // … add more as needed
     Unknown(u8),
@@ -33,6 +36,9 @@ impl From<u8> for StreamType {
     fn from(value: u8) -> Self {
         match value {
             0x01 => StreamType::Ac3,
+            0x0B => StreamType::Dts1,
+            0x0C => StreamType::Dts2,
+            0x0D => StreamType::Dts3,
             0x15 => StreamType::EAc3,
             other => StreamType::Unknown(other),
         }
@@ -52,6 +58,7 @@ impl Iec61937Preamble {
     pub fn payload_bytes(&self) -> Option<usize> {
         match self.stream_type {
             StreamType::Ac3 => Some((self.length_code as usize) / 8), // Pd in bits → bytes
+            StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => Some((self.length_code as usize) / 8), // Pd in bits → bytes
             StreamType::EAc3 => Some(self.length_code as usize),      // Pd already in bytes
             StreamType::Unknown(_) => None,
         }

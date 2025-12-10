@@ -1,4 +1,4 @@
-/* AC-3 decoder using ffmpeg child: write IEC61937 in, read 6ch float out */
+/* AC-3/E-AC3/DTS decoder using ffmpeg: write IEC61937 in, read multi-channel audio out */
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::process::{Child, Command, Stdio};
@@ -11,11 +11,11 @@ use ffmpeg_next::error::EAGAIN;
 use ffmpeg_next::format::Sample;
 use ffmpeg_next::format::sample::Type::Packed;
 use libpulse_binding::sample::{Format, Spec};
-use crate::iec61937_detector::{Iec61937Detector, Iec61937Preamble};
+use crate::iec61937_detector::{Iec61937Detector, Iec61937Preamble, StreamType};
 use crate::sinks::AudioSink;
 
 pub trait AudioDecoder : AudioSink {
-    fn wrap(sink: Box<dyn AudioSink + Send>) -> anyhow::Result<Self>
+    fn wrap(sink: Box<dyn AudioSink + Send>, codec_id: Id) -> anyhow::Result<Self>
     where Self: Sized;
 
     fn finish(self) -> anyhow::Result<Box<dyn AudioSink + Send>>;
@@ -23,6 +23,7 @@ pub trait AudioDecoder : AudioSink {
 
 pub struct Ac3DecoderSink {
     decoder: decoder::Audio,
+    codec_id: Id,                         // track which codec we're using
     resampler: Option<ffmpeg_next::software::resampling::Context>,
 
     frame: frame::Audio,
@@ -198,6 +199,99 @@ impl Ac3DecoderSink {
         Some((preamble, payload))
     }
 
+    fn iec61937_payload_to_dts_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
+        // DTS uses similar extraction as AC-3, but with different sync words
+        // DTS syncword: 0x7FFE8001 (32-bit, big-endian)
+        let mut be_words: Vec<u8> = match fmt {
+            Format::S16le | Format::S16NE => {
+                if payload.len() < 2 {
+                    return None;
+                }
+                let mut out = Vec::with_capacity(payload.len());
+                for chunk in payload.chunks_exact(2) {
+                    let w = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    out.extend_from_slice(&w.to_be_bytes());
+                }
+                out
+            }
+            Format::S32le | Format::S32NE => {
+                if payload.len() < 4 {
+                    return None;
+                }
+                let mut out = Vec::with_capacity(payload.len() / 2);
+                for chunk in payload.chunks_exact(4) {
+                    let s = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let w = (s >> 16) as u16;
+                    out.extend_from_slice(&w.to_be_bytes());
+                }
+                out
+            }
+            other => {
+                eprintln!("iec61937_payload_to_dts_be: unsupported capture format {:?}", other);
+                return None;
+            }
+        };
+
+        // Find DTS syncword 0x7FFE8001 in the reconstructed bitstream
+        let mut sync_idx = None;
+        for i in 0..be_words.len().saturating_sub(3) {
+            if be_words[i] == 0x7F && be_words[i + 1] == 0xFE
+                && be_words[i + 2] == 0x80 && be_words[i + 3] == 0x01 {
+                sync_idx = Some(i);
+                break;
+            }
+        }
+        let sync_idx = sync_idx?;
+
+        Some(be_words.split_off(sync_idx))
+    }
+
+    fn iec61937_payload_to_eac3_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
+        // E-AC3 uses similar extraction as AC-3
+        // E-AC3 syncword: 0x0B77 (16-bit, big-endian)
+        let mut be_words: Vec<u8> = match fmt {
+            Format::S16le | Format::S16NE => {
+                if payload.len() < 2 {
+                    return None;
+                }
+                let mut out = Vec::with_capacity(payload.len());
+                for chunk in payload.chunks_exact(2) {
+                    let w = u16::from_le_bytes([chunk[0], chunk[1]]);
+                    out.extend_from_slice(&w.to_be_bytes());
+                }
+                out
+            }
+            Format::S32le | Format::S32NE => {
+                if payload.len() < 4 {
+                    return None;
+                }
+                let mut out = Vec::with_capacity(payload.len() / 2);
+                for chunk in payload.chunks_exact(4) {
+                    let s = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    let w = (s >> 16) as u16;
+                    out.extend_from_slice(&w.to_be_bytes());
+                }
+                out
+            }
+            other => {
+                eprintln!("iec61937_payload_to_eac3_be: unsupported capture format {:?}", other);
+                return None;
+            }
+        };
+
+        // Find E-AC3 syncword 0x0B77 (same as AC-3)
+        let mut sync_idx = None;
+        for i in 0..be_words.len().saturating_sub(1) {
+            if be_words[i] == 0x0B && be_words[i + 1] == 0x77 {
+                sync_idx = Some(i);
+                break;
+            }
+        }
+        let sync_idx = sync_idx?;
+
+        Some(be_words.split_off(sync_idx))
+    }
+
     fn iec61937_payload_to_ac3_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
         // 1) First, rebuild the AC-3 bitstream as a sequence of 16-bit *words*
         //    in big-endian byte order.
@@ -260,8 +354,16 @@ impl AudioSink for Ac3DecoderSink {
         self.pending.extend_from_slice(bytes);
 
         // 2. While we have at least one whole frame, decode it
-        while let Some((_, frame_bytes)) = Self::take_ac3_burst(&mut self.pending) {
-            if let Some(raw_ac3) = Self::iec61937_payload_to_ac3_be(&frame_bytes, self.specs().format) {
+        while let Some((preamble, frame_bytes)) = Self::take_ac3_burst(&mut self.pending) {
+            let raw_data = match preamble.stream_type {
+                StreamType::Ac3 => Self::iec61937_payload_to_ac3_be(&frame_bytes, self.specs().format),
+                StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 =>
+                    Self::iec61937_payload_to_dts_be(&frame_bytes, self.specs().format),
+                StreamType::EAc3 => Self::iec61937_payload_to_eac3_be(&frame_bytes, self.specs().format),
+                _ => None,
+            };
+
+            if let Some(raw_ac3) = raw_data {
                 // eprintln!(
                 //     "AC3 packet len={} first 16 bytes: {:02X?}",
                 //     raw_ac3.len(),
@@ -286,7 +388,13 @@ impl AudioSink for Ac3DecoderSink {
                 //     }
                 // }
                 if let Err(e) = self.decoder.send_packet(&packet) {
-                    eprintln!("AC3: send_packet failed for this burst: {e}, dropping it");
+                    let codec_name = match self.codec_id {
+                        Id::AC3 => "AC3",
+                        Id::EAC3 => "E-AC3",
+                        Id::DTS => "DTS",
+                        _ => "CODEC",
+                    };
+                    eprintln!("{}: send_packet failed for this burst: {e}, dropping it", codec_name);
                     // Just skip this burst and keep going; decoder will sync later if data becomes valid
                     continue;
                 }
@@ -305,7 +413,13 @@ impl AudioSink for Ac3DecoderSink {
                     }
                 }
             } else {
-                eprintln!("No AC-3 syncword found in burst, dropping");
+                let codec_name = match preamble.stream_type {
+                    StreamType::Ac3 => "AC-3",
+                    StreamType::EAc3 => "E-AC3",
+                    StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => "DTS",
+                    _ => "codec",
+                };
+                eprintln!("No {} syncword found in burst, dropping", codec_name);
             }
         }
 
@@ -319,18 +433,25 @@ impl AudioSink for Ac3DecoderSink {
 
 impl AudioDecoder for Ac3DecoderSink {
 
-    fn wrap(sink: Box<dyn AudioSink + Send>) -> anyhow::Result<Self> {
+    fn wrap(sink: Box<dyn AudioSink + Send>, codec_id: Id) -> anyhow::Result<Self> {
         let out_spec = sink.specs();
         let out_sample_fmt = Self::map_pa_format_to_ffmpeg_sample(out_spec.format)?;
         let out_layout     = Self::choose_layout_for_channels(out_spec.channels)?;
         let out_rate       = out_spec.rate;
 
-        // Find AC3 decoder
-        let ac3 = decoder::find(Id::AC3)
-            .ok_or_else(|| anyhow::anyhow!("AC3 decoder not found in ffmpeg"))?;
+        // Find decoder for the specified codec
+        let codec_name = match codec_id {
+            Id::AC3 => "AC3",
+            Id::EAC3 => "E-AC3",
+            Id::DTS => "DTS",
+            _ => "Unknown",
+        };
+
+        let codec = decoder::find(codec_id)
+            .ok_or_else(|| anyhow::anyhow!("{} decoder not found in ffmpeg", codec_name))?;
 
         // Create codec context
-        let mut decoder = context::Context::new_with_codec(ac3)
+        let mut decoder = context::Context::new_with_codec(codec)
             .decoder().audio()?;
 
         // Optionally set requested sample_fmt / channels here, or resample later.
@@ -338,6 +459,7 @@ impl AudioDecoder for Ac3DecoderSink {
 
         Ok(Self {
             decoder,
+            codec_id,
             resampler: None,
             frame: frame::Audio::empty(),
             pending: Vec::with_capacity(4096),

@@ -18,8 +18,9 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use libpulse_binding::channelmap::MapDef::ALSA;
 use crate::sinks::{FileSink, PulseAudioSink};
-use iec61937_detector::Iec61937Detector;
+use iec61937_detector::{Iec61937Detector, StreamType};
 use crate::decoders::{AudioDecoder, Ac3DecoderSink};
+use ffmpeg_next::codec::Id;
 
 /// IEC-61937 preamble words (big-endian)
 const PA_SYNC: u16 = 0xF872;
@@ -31,7 +32,7 @@ const DEFAULT_DET_WINDOW_CHUNKS: usize = 64;
 #[derive(Parser, Debug)]
 #[command(
     version,
-    about = "PCM/AC3 autodetector/decoder: stdin FIFO or PulseAudio -> (PCM) -> PulseAudio or FIFO"
+    about = "PCM/AC3/E-AC3/DTS autodetector/decoder: stdin FIFO or PulseAudio -> (PCM) -> PulseAudio or FIFO"
 )]
 struct Args {
     /// PulseAudio source name (ignored if --stdin is set)
@@ -210,6 +211,7 @@ fn main() -> Result<()> {
 
     let mut mode = Mode::Unknown;
     let mut chunks_without_61937 = 0usize;
+    let mut current_codec: Option<Id> = None;
 
     loop {
         let chunk = input.read_chunk()?;
@@ -217,13 +219,26 @@ fn main() -> Result<()> {
 
         match mode {
             Mode::Unknown => {
-                if has_61937.is_some() {
-                    eprintln!("[INIT] Found IEC-61937 (AC-3). Switching to AC-3 decode.");
+                if let Some(preamble) = has_61937 {
+                    let codec_name = match preamble.stream_type {
+                        StreamType::Ac3 => "AC-3",
+                        StreamType::EAc3 => "E-AC-3",
+                        StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => "DTS",
+                        _ => "Unknown",
+                    };
+                    eprintln!("[INIT] Found IEC-61937 ({}). Switching to decode.", codec_name);
                     mode = Mode::Iec61937;
                     chunks_without_61937 = 0;
 
-                    // open AC3 sink target
-                    decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
+                    let codec_id = match preamble.stream_type {
+                        StreamType::Ac3 => Id::AC3,
+                        StreamType::EAc3 => Id::EAC3,
+                        StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => Id::DTS,
+                        _ => Id::AC3, // fallback
+                    };
+
+                    decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?, codec_id)?);
+                    current_codec = Some(codec_id);
 
                     if let Some(s) = &mut decoder_sink {
                         s.write(chunk)?;
@@ -241,13 +256,27 @@ fn main() -> Result<()> {
                 }
             }
             Mode::Pcm => {
-                if has_61937.is_some() {
-                    eprintln!("Detected AC-3; switching PCM -> AC-3 decode.");
+                if let Some(preamble) = has_61937 {
+                    let codec_name = match preamble.stream_type {
+                        StreamType::Ac3 => "AC-3",
+                        StreamType::EAc3 => "E-AC-3",
+                        StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => "DTS",
+                        _ => "Unknown",
+                    };
+                    eprintln!("Detected {}; switching PCM -> decode.", codec_name);
 
                     mode = Mode::Iec61937;
                     chunks_without_61937 = 0;
 
-                    decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
+                    let codec_id = match preamble.stream_type {
+                        StreamType::Ac3 => Id::AC3,
+                        StreamType::EAc3 => Id::EAC3,
+                        StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => Id::DTS,
+                        _ => Id::AC3, // fallback
+                    };
+
+                    decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?, codec_id)?);
+                    current_codec = Some(codec_id);
 
                     if let Some(s) = &mut decoder_sink {
                         s.write(chunk)?;
@@ -257,8 +286,35 @@ fn main() -> Result<()> {
                 }
             }
             Mode::Iec61937 => {
-                if has_61937.is_some() {
+                if let Some(preamble) = has_61937 {
                     chunks_without_61937 = 0;
+
+                    // Check if codec type changed
+                    let detected_codec = match preamble.stream_type {
+                        StreamType::Ac3 => Id::AC3,
+                        StreamType::EAc3 => Id::EAC3,
+                        StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => Id::DTS,
+                        _ => current_codec.unwrap_or(Id::AC3),
+                    };
+
+                    if current_codec != Some(detected_codec) {
+                        let codec_name = match detected_codec {
+                            Id::AC3 => "AC-3",
+                            Id::EAC3 => "E-AC-3",
+                            Id::DTS => "DTS",
+                            _ => "Unknown",
+                        };
+                        eprintln!("Codec changed to {}; reinitializing decoder.", codec_name);
+
+                        // Close old decoder and reinitialize with new codec
+                        if let Some(dec) = decoder_sink.take() {
+                            decoded_sink = Some(dec.finish()?)
+                        }
+
+                        decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?, detected_codec)?);
+                        current_codec = Some(detected_codec);
+                    }
+
                     if let Some(s) = &mut decoder_sink {
                         s.write(chunk)?;
                     }
