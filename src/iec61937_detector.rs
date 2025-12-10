@@ -60,11 +60,12 @@ impl Iec61937Preamble {
 
 pub struct Iec61937Detector {}
 impl Iec61937Detector {
-    pub fn new() -> Self {
-        Self {}
-    }
 
     pub fn find_preamble(bytes: &[u8]) -> Option<Iec61937Preamble> {
+        Self::find_preamble_with_index(bytes).map(move |t| t.1)
+    }
+    
+    pub fn find_preamble_with_index(bytes: &[u8]) -> Option<(usize, Iec61937Preamble)> {
         if bytes.len() < 8 {
             return None;
         }
@@ -84,13 +85,13 @@ impl Iec61937Detector {
                 let info = ((pc & PC_INFO_MASK) >> PC_INFO_SHIFT) as u8;
                 let stream_num = ((pc & PC_STRM_MASK) >> PC_STRM_SHIFT) as u8;
 
-                return Some(Iec61937Preamble {
+                return Some((i, Iec61937Preamble {
                     stream_type: data_type.into(),
                     error,
                     info,
                     stream_number: stream_num,
                     length_code: pd,
-                });
+                }));
             }
         }
         None

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+ffmpeg-next = { version = "8", features = ["build"] }
 clap = { version = "4", features = ["derive"] }
 libpulse-binding = "2.27.1"
 libpulse-simple-binding = "2.27.1"

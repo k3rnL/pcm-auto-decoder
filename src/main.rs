@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use libpulse_binding::channelmap::MapDef::ALSA;
 use crate::sinks::{FileSink, PulseAudioSink};
 use iec61937_detector::Iec61937Detector;
-use crate::decoders::{AudioDecoder, FfmpegDecoderSink};
+use crate::decoders::{AudioDecoder, Ac3DecoderSink};
 
 /// IEC-61937 preamble words (big-endian)
 const PA_SYNC: u16 = 0xF872;
@@ -185,8 +185,15 @@ impl Input {
 fn main() -> Result<()> {
     let args = Args::parse();
 
+    ffmpeg_next::init().expect("ffmpeg init failed");
+
     // Declare sinks:
-    let mut decoder_sink: Option<FfmpegDecoderSink> = None;
+    let mut decoder_sink: Option<Ac3DecoderSink> = None;
+
+    eprintln!(
+        "Starting… source={:?} stdin={:?} outPCM={:?} out6ch={:?} chunk_frames={} det_window={}",
+        args.source, args.stdin, args.fifo_out_pcm, args.fifo_out_decoded, args.chunk_frames, args.det_window
+    );
 
     let mut pcm_sink: Option<Box<dyn AudioSink + Send>> = match &args.fifo_out_pcm {
         Some(p) => Some(Box::new(FileSink::open(p, Format::parse(&args.out_pcm_format), args.out_pcm_rate, args.out_pcm_channels)?)), // RDWR as above
@@ -204,11 +211,6 @@ fn main() -> Result<()> {
     let mut mode = Mode::Unknown;
     let mut chunks_without_61937 = 0usize;
 
-    eprintln!(
-        "Running… source={:?} stdin={:?} outPCM={:?} out6ch={:?} chunk_frames={} det_window={}",
-        args.source, args.stdin, args.fifo_out_pcm, args.fifo_out_decoded, args.chunk_frames, args.det_window
-    );
-
     loop {
         let chunk = input.read_chunk()?;
         let has_61937 = Iec61937Detector::find_preamble(chunk);
@@ -221,7 +223,7 @@ fn main() -> Result<()> {
                     chunks_without_61937 = 0;
 
                     // open AC3 sink target
-                    decoder_sink = Some(FfmpegDecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
+                    decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
 
                     if let Some(s) = &mut decoder_sink {
                         s.write(chunk)?;
@@ -245,7 +247,7 @@ fn main() -> Result<()> {
                     mode = Mode::Iec61937;
                     chunks_without_61937 = 0;
 
-                    decoder_sink = Some(FfmpegDecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
+                    decoder_sink = Some(Ac3DecoderSink::wrap(decoded_sink.take().context("decoded_sink not set")?)?);
 
                     if let Some(s) = &mut decoder_sink {
                         s.write(chunk)?;

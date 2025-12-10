@@ -22,7 +22,7 @@ pub(crate) struct PulseAudioSink {
 impl PulseAudioSink {
     pub(crate) fn open(sink: Option<&str>, format: Format, rate: u32, channels: u8, chunk_frames: usize) -> anyhow::Result<Self> {
         let ss = Spec { format, rate, channels };
-        anyhow::ensure!(ss.is_valid(), "Invalid sample spec");
+        anyhow::ensure!(ss.is_valid(), format!("Invalid sample spec: {:?} ", format));
         let mut cm = Map::default();
         cm.init_auto(channels, AIFF);
 
@@ -38,7 +38,7 @@ impl PulseAudioSink {
             minreq: frag_bytes,
             fragsize: u32::MAX, // playback -> ignoré
         };
-        
+
         let pa = Simple::new(
             None,
             "pcm-auto-decoder",
@@ -81,5 +81,27 @@ impl AudioSink for FileSink {
 
     fn specs(& self) -> Spec {
         todo!()
+    }
+}
+
+// Memory sink for debug purposes
+pub struct MemorySink {
+    buffer: Vec<u8>,
+    spec: Spec
+}
+
+impl MemorySink {
+    pub(crate) fn open(format: Format, rate: u32, channels: u8) -> anyhow::Result<Self> {
+        Ok(Self { buffer: Vec::new(), spec: Spec {format, rate, channels} })
+    }
+}
+
+impl AudioSink for MemorySink {
+    fn write(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+        Ok(self.buffer.extend_from_slice(bytes))
+    }
+
+    fn specs(&self) -> Spec {
+        self.spec
     }
 }
