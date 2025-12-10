@@ -84,12 +84,12 @@ impl Ac3DecoderSink {
         let in_rate   = self.frame.rate();
 
         let swr = ffmpeg_next::software::resampling::Context::get(
-            self.out_sample_fmt,
-            self.out_layout,
-            self.out_rate,
             in_fmt,
             in_layout,
             in_rate,
+            self.out_sample_fmt,
+            self.out_layout,
+            self.out_rate,
         ).context("creating resampler context")?;
 
         self.resampler = Some(swr);
@@ -262,11 +262,11 @@ impl AudioSink for Ac3DecoderSink {
         // 2. While we have at least one whole frame, decode it
         while let Some((_, frame_bytes)) = Self::take_ac3_burst(&mut self.pending) {
             if let Some(raw_ac3) = Self::iec61937_payload_to_ac3_be(&frame_bytes, self.specs().format) {
-                eprintln!(
-                    "AC3 packet len={} first 16 bytes: {:02X?}",
-                    raw_ac3.len(),
-                    &raw_ac3[..raw_ac3.len().min(16)]
-                );
+                // eprintln!(
+                //     "AC3 packet len={} first 16 bytes: {:02X?}",
+                //     raw_ac3.len(),
+                //     &raw_ac3[..raw_ac3.len().min(16)]
+                // );
 
                 // {
                 //     // Debug dump – remove later
