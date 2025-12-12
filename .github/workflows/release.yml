@@ -58,8 +58,8 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          BIN_NAME="decoder"            # <-- change if needed
-          VERSION="${GITHUB_REF_NAME}"  # e.g. v1.2.3
+          BIN_NAME="pcm-auto-decoder"
+          VERSION="${GITHUB_REF_NAME}"
           OUTDIR="dist"
           mkdir -p "${OUTDIR}"
 
