@@ -84,6 +84,10 @@ impl Ac3DecoderSink {
         let in_layout = self.frame.channel_layout();
         let in_rate   = self.frame.rate();
 
+        eprintln!("Resampler initialized: decoded format={:?}, layout={:?}, rate={} Hz -> output format={:?}, layout={:?}, rate={} Hz",
+                  in_fmt, in_layout, in_rate,
+                  self.out_sample_fmt, self.out_layout, self.out_rate);
+
         let swr = ffmpeg_next::software::resampling::Context::get(
             in_fmt,
             in_layout,
