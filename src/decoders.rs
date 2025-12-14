@@ -199,102 +199,8 @@ impl Ac3DecoderSink {
         Some((preamble, payload))
     }
 
-    fn iec61937_payload_to_dts_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
-        // DTS uses similar extraction as AC-3, but with different sync words
-        // DTS syncword: 0x7FFE8001 (32-bit, big-endian)
-        let mut be_words: Vec<u8> = match fmt {
-            Format::S16le | Format::S16NE => {
-                if payload.len() < 2 {
-                    return None;
-                }
-                let mut out = Vec::with_capacity(payload.len());
-                for chunk in payload.chunks_exact(2) {
-                    let w = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    out.extend_from_slice(&w.to_be_bytes());
-                }
-                out
-            }
-            Format::S32le | Format::S32NE => {
-                if payload.len() < 4 {
-                    return None;
-                }
-                let mut out = Vec::with_capacity(payload.len() / 2);
-                for chunk in payload.chunks_exact(4) {
-                    let s = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    let w = (s >> 16) as u16;
-                    out.extend_from_slice(&w.to_be_bytes());
-                }
-                out
-            }
-            other => {
-                eprintln!("iec61937_payload_to_dts_be: unsupported capture format {:?}", other);
-                return None;
-            }
-        };
-
-        // Find DTS syncword 0x7FFE8001 in the reconstructed bitstream
-        let mut sync_idx = None;
-        for i in 0..be_words.len().saturating_sub(3) {
-            if be_words[i] == 0x7F && be_words[i + 1] == 0xFE
-                && be_words[i + 2] == 0x80 && be_words[i + 3] == 0x01 {
-                sync_idx = Some(i);
-                break;
-            }
-        }
-        let sync_idx = sync_idx?;
-
-        Some(be_words.split_off(sync_idx))
-    }
-
-    fn iec61937_payload_to_eac3_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
-        // E-AC3 uses similar extraction as AC-3
-        // E-AC3 syncword: 0x0B77 (16-bit, big-endian)
-        let mut be_words: Vec<u8> = match fmt {
-            Format::S16le | Format::S16NE => {
-                if payload.len() < 2 {
-                    return None;
-                }
-                let mut out = Vec::with_capacity(payload.len());
-                for chunk in payload.chunks_exact(2) {
-                    let w = u16::from_le_bytes([chunk[0], chunk[1]]);
-                    out.extend_from_slice(&w.to_be_bytes());
-                }
-                out
-            }
-            Format::S32le | Format::S32NE => {
-                if payload.len() < 4 {
-                    return None;
-                }
-                let mut out = Vec::with_capacity(payload.len() / 2);
-                for chunk in payload.chunks_exact(4) {
-                    let s = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                    let w = (s >> 16) as u16;
-                    out.extend_from_slice(&w.to_be_bytes());
-                }
-                out
-            }
-            other => {
-                eprintln!("iec61937_payload_to_eac3_be: unsupported capture format {:?}", other);
-                return None;
-            }
-        };
-
-        // Find E-AC3 syncword 0x0B77 (same as AC-3)
-        let mut sync_idx = None;
-        for i in 0..be_words.len().saturating_sub(1) {
-            if be_words[i] == 0x0B && be_words[i + 1] == 0x77 {
-                sync_idx = Some(i);
-                break;
-            }
-        }
-        let sync_idx = sync_idx?;
-
-        Some(be_words.split_off(sync_idx))
-    }
-
-    fn iec61937_payload_to_ac3_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
-        // 1) First, rebuild the AC-3 bitstream as a sequence of 16-bit *words*
-        //    in big-endian byte order.
+    fn iec61937_payload_to_be(payload: &[u8], fmt: Format, syncword: &[u8]) -> Option<Vec<u8>> {
+        // Rebuild the bitstream as a sequence of 16-bit words in big-endian byte order
         let mut be_words: Vec<u8> = match fmt {
             // Most common: 16-bit IEC words captured as S16_LE
             Format::S16le | Format::S16NE => {
@@ -328,23 +234,38 @@ impl Ac3DecoderSink {
 
             // Other PCM formats not supported for IEC61937 here
             other => {
-                eprintln!("iec61937_payload_to_ac3_be: unsupported capture format {:?}", other);
+                eprintln!("iec61937_payload_to_be: unsupported capture format {:?}", other);
                 return None;
             }
         };
 
-        // 2) Find AC-3 syncword 0x0B77 in the reconstructed bitstream
+        // Find syncword in the reconstructed bitstream
+        let sync_len = syncword.len();
         let mut sync_idx = None;
-        for i in 0..be_words.len().saturating_sub(1) {
-            if be_words[i] == 0x0B && be_words[i + 1] == 0x77 {
+        for i in 0..be_words.len().saturating_sub(sync_len - 1) {
+            if &be_words[i..i + sync_len] == syncword {
                 sync_idx = Some(i);
                 break;
             }
         }
         let sync_idx = sync_idx?;
 
-        // 3) Return from syncword onward (you can later trim to exact frame size)
         Some(be_words.split_off(sync_idx))
+    }
+
+    fn iec61937_payload_to_ac3_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
+        // AC-3 syncword: 0x0B77 (16-bit, big-endian)
+        Self::iec61937_payload_to_be(payload, fmt, &[0x0B, 0x77])
+    }
+
+    fn iec61937_payload_to_eac3_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
+        // E-AC3 syncword: 0x0B77 (same as AC-3)
+        Self::iec61937_payload_to_be(payload, fmt, &[0x0B, 0x77])
+    }
+
+    fn iec61937_payload_to_dts_be(payload: &[u8], fmt: Format) -> Option<Vec<u8>> {
+        // DTS syncword: 0x7FFE8001 (32-bit, big-endian)
+        Self::iec61937_payload_to_be(payload, fmt, &[0x7F, 0xFE, 0x80, 0x01])
     }
 }
 
