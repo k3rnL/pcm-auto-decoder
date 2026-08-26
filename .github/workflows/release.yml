@@ -143,6 +143,7 @@ jobs:
             git \
             gzip \
             libavcodec61 \
+            libavformat61 \
             libavutil59 \
             libpipewire-0.3-0 \
             libswresample5 \
