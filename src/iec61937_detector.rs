@@ -1,10 +1,3 @@
-/// IEC-61937 preamble words (big-endian)
-const PA_SYNC: u16 = 0xF872;
-const PB_SYNC: u16 = 0x4E1F;
-
-const DEFAULT_CHUNK_FRAMES: usize = 2048;
-const DEFAULT_DET_WINDOW_CHUNKS: usize = 64;
-
 // Pc (16-bit) bit layout:
 //  [6:0]   data_type
 //  [7]     error
@@ -21,12 +14,12 @@ pub const PC_INFO_SHIFT: u8 = 8;
 pub const PC_STRM_SHIFT: u8 = 13;
 
 #[repr(u8)]
-#[derive(Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamType {
     Ac3 = 0x01,
-    Dts1 = 0x0B,      // DTS type I
-    Dts2 = 0x0C,      // DTS type II
-    Dts3 = 0x0D,      // DTS type III
+    Dts1 = 0x0B, // DTS type I
+    Dts2 = 0x0C, // DTS type II
+    Dts3 = 0x0D, // DTS type III
     EAc3 = 0x15,
     // … add more as needed
     Unknown(u8),
@@ -45,7 +38,7 @@ impl From<u8> for StreamType {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Iec61937Preamble {
     pub stream_type: StreamType, // Pc[6:0]
     pub error: bool,             // Pc[7]
@@ -58,7 +51,9 @@ impl Iec61937Preamble {
     pub fn payload_bytes(&self) -> Option<usize> {
         match self.stream_type {
             StreamType::Ac3 => Some((self.length_code as usize) / 8), // Pd in bits → bytes
-            StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => Some((self.length_code as usize) / 8), // Pd in bits → bytes
+            StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3 => {
+                Some((self.length_code as usize) / 8)
+            } // Pd in bits → bytes
             StreamType::EAc3 => Some(self.length_code as usize),      // Pd already in bytes
             StreamType::Unknown(_) => None,
         }
@@ -67,11 +62,10 @@ impl Iec61937Preamble {
 
 pub struct Iec61937Detector {}
 impl Iec61937Detector {
-
     pub fn find_preamble(bytes: &[u8]) -> Option<Iec61937Preamble> {
         Self::find_preamble_with_index(bytes).map(move |t| t.1)
     }
-    
+
     pub fn find_preamble_with_index(bytes: &[u8]) -> Option<(usize, Iec61937Preamble)> {
         if bytes.len() < 8 {
             return None;
@@ -92,13 +86,16 @@ impl Iec61937Detector {
                 let info = ((pc & PC_INFO_MASK) >> PC_INFO_SHIFT) as u8;
                 let stream_num = ((pc & PC_STRM_MASK) >> PC_STRM_SHIFT) as u8;
 
-                return Some((i, Iec61937Preamble {
-                    stream_type: data_type.into(),
-                    error,
-                    info,
-                    stream_number: stream_num,
-                    length_code: pd,
-                }));
+                return Some((
+                    i,
+                    Iec61937Preamble {
+                        stream_type: data_type.into(),
+                        error,
+                        info,
+                        stream_number: stream_num,
+                        length_code: pd,
+                    },
+                ));
             }
         }
         None
@@ -109,8 +106,6 @@ impl Iec61937Detector {
 mod tests {
     use super::*;
     use crate::iec61937_detector::StreamType::Ac3;
-    use anyhow::Context;
-    use base64::Engine;
 
     #[test]
     fn can_detect_ac3() -> Result<(), String> {
@@ -125,5 +120,33 @@ mod tests {
         assert!(preamble.is_some());
         assert_eq!(preamble.unwrap().stream_type, Ac3);
         Ok(())
+    }
+
+    #[test]
+    fn codec_preamble_fixtures_cover_ac3_eac3_and_dts() {
+        fn fixture(data_type: u8) -> [u8; 8] {
+            [0x72, 0xF8, 0x1F, 0x4E, data_type, 0, 0x80, 0]
+        }
+
+        assert_eq!(
+            Iec61937Detector::find_preamble(&fixture(0x01))
+                .unwrap()
+                .stream_type,
+            StreamType::Ac3
+        );
+        assert_eq!(
+            Iec61937Detector::find_preamble(&fixture(0x15))
+                .unwrap()
+                .stream_type,
+            StreamType::EAc3
+        );
+        for data_type in [0x0B, 0x0C, 0x0D] {
+            assert!(matches!(
+                Iec61937Detector::find_preamble(&fixture(data_type))
+                    .unwrap()
+                    .stream_type,
+                StreamType::Dts1 | StreamType::Dts2 | StreamType::Dts3
+            ));
+        }
     }
 }
