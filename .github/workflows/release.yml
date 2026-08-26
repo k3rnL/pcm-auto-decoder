@@ -10,108 +10,162 @@ permissions:
 
 jobs:
   build:
-    name: build (${{ matrix.target }})
+    name: Debian Trixie build (${{ matrix.target }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            runs_on: ubuntu-latest
+            runs_on: ubuntu-24.04
           - target: aarch64-unknown-linux-gnu
             runs_on: ubuntu-24.04-arm
 
     runs-on: ${{ matrix.runs_on }}
+    container:
+      image: rust:1.98.0-trixie
+    env:
+      CARGO_TERM_COLOR: always
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # ffmpeg-sys-next builds FFmpeg from source; on x86_64 it needs nasm for x86 asm.
-      - name: Install build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            nasm yasm pkg-config \
-            make clang git perl python3
-
-      - name: Install build deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            nasm yasm pkg-config \
-            libpulse-dev libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev libclang-dev
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-
-      - name: Build (release)
-        env:
-          TARGET: ${{ matrix.target }}
-        run: |
-          cargo build --release --target "${TARGET}"
-
-      - name: Package artifacts
+      - name: Install Debian Trixie build and runtime dependencies
         shell: bash
-        env:
-          TARGET: ${{ matrix.target }}
         run: |
-          BIN_NAME="pcm-auto-decoder"
-          VERSION="${GITHUB_REF_NAME}"
-          OUTDIR="dist"
-          mkdir -p "${OUTDIR}"
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils \
+            ca-certificates \
+            clang \
+            file \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libswresample-dev \
+            pkg-config \
+            python3
+          rm -rf /var/lib/apt/lists/*
 
-          cp "target/${TARGET}/release/${BIN_NAME}" "${OUTDIR}/${BIN_NAME}"
-          chmod +x "${OUTDIR}/${BIN_NAME}"
+      - name: Run locked tag gates
+        shell: bash
+        run: scripts/ci-gates.sh "${{ matrix.target }}" "${GITHUB_REF_NAME}"
 
-          TARBALL="${BIN_NAME}-${VERSION}-${TARGET}.tar.gz"
-          tar -C "${OUTDIR}" -czf "${OUTDIR}/${TARBALL}" "${BIN_NAME}"
-          (cd "${OUTDIR}" && sha256sum "${TARBALL}" > "${TARBALL}.sha256")
+      - name: Package target-qualified release archive
+        shell: bash
+        run: |
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "${GITHUB_SHA}")
+          scripts/package-release.sh \
+            "${{ matrix.target }}" \
+            "${GITHUB_REF_NAME}" \
+            "target/${{ matrix.target }}/release/pcm-auto-decoder" \
+            dist
 
-      - name: Upload build artifacts
+      - name: Upload release assets
         uses: actions/upload-artifact@v4
         with:
-          name: dist-${{ matrix.target }}
-          path: dist/*
+          name: release-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.sha256
+            dist/*.provenance.json
+          if-no-files-found: error
 
   release:
-    name: create release
-    runs-on: ubuntu-latest
+    name: Create GitHub release
+    runs-on: ubuntu-24.04
     needs: build
 
     steps:
-      - name: Checkout (full history for changelog)
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Download all artifacts
+      - name: Download validated assets
         uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: dist
 
-      - name: Flatten dist folder
+      - name: Assemble assets without filename collisions
         shell: bash
         run: |
           mkdir -p release_dist
-          find dist -type f -maxdepth 2 -print -exec cp -v {} release_dist/ \;
+          while IFS= read -r -d '' asset; do
+            basename=$(basename "${asset}")
+            if [[ -e "release_dist/${basename}" ]]; then
+              echo "duplicate release asset name: ${basename}" >&2
+              exit 1
+            fi
+            cp "${asset}" "release_dist/${basename}"
+          done < <(find dist -type f -print0)
+          test "$(find release_dist -type f -name '*.tar.gz' | wc -l)" -eq 2
+          test "$(find release_dist -type f -name '*.sha256' | wc -l)" -eq 2
+          test "$(find release_dist -type f -name '*.provenance.json' | wc -l)" -eq 2
+          (cd release_dist && sha256sum --check ./*.sha256)
 
-      - name: Generate release notes (git-cliff)
-        uses: orhun/git-cliff-action@v4
-        id: git-cliff
-        with:
-          config: cliff.toml
-          args: -vv --latest --strip header
-        env:
-          OUTPUT: "release_notes.md"
-          GITHUB_REPO: ${{ github.repository }}
-
-      - name: Create GitHub Release + upload assets
+      - name: Create GitHub release and upload assets
         uses: softprops/action-gh-release@v2
         with:
-          body: ${{ steps.git-cliff.outputs.content }}
-          files: |
-            release_dist/*.tar.gz
-            release_dist/*.sha256
+          name: PCM Auto Decoder ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: release_dist/*
+
+  verify-published:
+    name: Verify published Trixie asset (${{ matrix.target }})
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs_on: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+    container:
+      image: debian:trixie-slim
+    env:
+      GH_TOKEN: ${{ github.token }}
+
+    steps:
+      - name: Install minimum Trixie runtime and verification tools
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils \
+            ca-certificates \
+            coreutils \
+            file \
+            gh \
+            git \
+            gzip \
+            libavcodec61 \
+            libavutil59 \
+            libpipewire-0.3-0 \
+            libswresample5 \
+            python3 \
+            tar
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Checkout tag source for verification scripts
+        uses: actions/checkout@v4
+
+      - name: Download published release bytes
+        shell: bash
+        run: |
+          mkdir downloaded
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --dir downloaded \
+            --pattern 'pcm-auto-decoder-*'
+          release_title=$(gh release view "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json name \
+            --jq .name)
+          test "${release_title}" = "PCM Auto Decoder ${GITHUB_REF_NAME}"
+
+      - name: Verify downloaded target archive
+        shell: bash
+        run: scripts/verify-release-archive.sh downloaded "${{ matrix.target }}" "${GITHUB_REF_NAME}"

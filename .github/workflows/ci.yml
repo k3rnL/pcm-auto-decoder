@@ -1,0 +1,65 @@
+name: native-ci
+
+on:
+  push:
+    branches:
+      - "**"
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: decoder-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native:
+    name: Debian Trixie (${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runs_on: ubuntu-24.04
+          - target: aarch64-unknown-linux-gnu
+            runs_on: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runs_on }}
+    container:
+      image: rust:1.98.0-trixie
+    env:
+      CARGO_TERM_COLOR: always
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Debian Trixie build and runtime dependencies
+        shell: bash
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            binutils \
+            ca-certificates \
+            clang \
+            file \
+            libavcodec-dev \
+            libavformat-dev \
+            libavutil-dev \
+            libclang-dev \
+            libpipewire-0.3-dev \
+            libswresample-dev \
+            pkg-config \
+            python3
+          rm -rf /var/lib/apt/lists/*
+
+      - name: Run locked native release gates
+        shell: bash
+        run: scripts/ci-gates.sh "${{ matrix.target }}"
+
+      - name: Upload validated release binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: decoder-ci-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/pcm-auto-decoder
+          if-no-files-found: error
