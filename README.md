@@ -228,9 +228,12 @@ Release preparation is intentionally separate from tagging:
 
 1. Update the Cargo version and regenerate `Cargo.lock`.
 2. Run both architecture gates and merge through the normal branch/PR CI.
-3. Create and push the immutable `v<version>` tag at the accepted commit.
+3. Create and push one matching `v<version>` tag at the accepted commit.
 4. The tag workflow rebuilds both targets natively on Trixie with `--locked`.
-5. It publishes target-qualified archives, SHA-256 files, and provenance.
+5. It requires the repository immutable-release policy, creates a draft,
+   attaches every target-qualified archive, SHA-256 file, and provenance
+   record, then publishes the complete release. Publication makes its tag and
+   assets immutable.
 6. Native Trixie jobs download the published bytes, verify their identity and
    linkage, and run the bounded offline fixture smoke again.
 
